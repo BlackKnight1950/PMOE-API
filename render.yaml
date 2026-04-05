@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: pmoe-dashboard-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: SMARTSHEET_TOKEN
+        sync: false
+      - key: NODE_VERSION
+        value: 18.20.0
