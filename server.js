@@ -2,12 +2,14 @@
  * PMOE Command Center — Smartsheet Live Data API
  * Hosted on Render.com (free tier)
  *
- * Set ONE environment variable in Render dashboard:
- *   SMARTSHEET_TOKEN = your Smartsheet API token
+ * Set environment variables in Render dashboard:
+ *   SMARTSHEET_TOKEN  = your Smartsheet API token
+ *   ANTHROPIC_API_KEY = your Anthropic API key  (for Key Insights)
  *
  * Endpoints:
- *   GET /api/data    — returns live project + risk + compliance data
- *   GET /api/health  — health check (no auth needed)
+ *   GET  /api/health  — health check (no auth needed)
+ *   GET  /api/data    — returns live project + risk + compliance data
+ *   POST /api/ai      — proxy for Claude Key Insights (body: { prompt })
  */
 
 const express = require('express');
@@ -27,7 +29,7 @@ const RISK_SHEET_PG    = '3689972654624644';  // CCH-Press Ganey Risks Log
 const RISK_SHEET_LAB   = '7875273287487364';  // Lab Automation Risks Log
 const COMPLIANCE_SHEET = '2177565233991556';  // PM Process Compliance Audit
 
-function headers() {
+function ssHeaders() {
   return {
     'Authorization': `Bearer ${process.env.SMARTSHEET_TOKEN}`,
     'Content-Type': 'application/json'
@@ -39,8 +41,51 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    token_configured: !!process.env.SMARTSHEET_TOKEN
+    smartsheet_configured: !!process.env.SMARTSHEET_TOKEN,
+    anthropic_configured:  !!process.env.ANTHROPIC_API_KEY
   });
+});
+
+// ── AI proxy — routes Key Insights calls through server so the API key ────────
+// stays server-side and CORS is never an issue.
+app.post('/api/ai', async (req, res) => {
+  const { prompt } = req.body || {};
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({
+      error: 'ANTHROPIC_API_KEY not configured. Add it in the Render environment variables.'
+    });
+  }
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':         'application/json',
+        'x-api-key':            process.env.ANTHROPIC_API_KEY,
+        'anthropic-version':    '2023-06-01'
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages:   [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      return res.status(502).json({ error: `Anthropic error ${response.status}: ${errBody}` });
+    }
+
+    const data = await response.json();
+    const text = (data.content || []).map(b => b.text || '').join('');
+    res.json({ text });
+
+  } catch (err) {
+    console.error('AI proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Main data endpoint ────────────────────────────────────────────────────────
@@ -54,10 +99,10 @@ app.get('/api/data', async (req, res) => {
   try {
     // Fetch all Smartsheet sources in parallel
     const [reportRes, pgRiskRes, labRiskRes, complianceRes] = await Promise.all([
-      fetch(`${SS_BASE}/reports/${REPORT_ID}?pageSize=100`, { headers: headers() }),
-      fetch(`${SS_BASE}/sheets/${RISK_SHEET_PG}?pageSize=100`,   { headers: headers() }),
-      fetch(`${SS_BASE}/sheets/${RISK_SHEET_LAB}?pageSize=100`,  { headers: headers() }),
-      fetch(`${SS_BASE}/sheets/${COMPLIANCE_SHEET}?pageSize=200`,{ headers: headers() })
+      fetch(`${SS_BASE}/reports/${REPORT_ID}?pageSize=100`, { headers: ssHeaders() }),
+      fetch(`${SS_BASE}/sheets/${RISK_SHEET_PG}?pageSize=100`,   { headers: ssHeaders() }),
+      fetch(`${SS_BASE}/sheets/${RISK_SHEET_LAB}?pageSize=100`,  { headers: ssHeaders() }),
+      fetch(`${SS_BASE}/sheets/${COMPLIANCE_SHEET}?pageSize=200`,{ headers: ssHeaders() })
     ]);
 
     if (reportRes.status === 401) {
@@ -155,7 +200,7 @@ app.get('/api/data', async (req, res) => {
       if (!cell) return false;
       if (cell.value === true)  return true;
       if (cell.value === false) return false;
-      if (cell.displayValue === 'NA') return false;
+      if (cell.displayValue === 'NA') return 'NA';
       return !!cell.value;
     };
 
@@ -195,5 +240,6 @@ app.get('/api/data', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`PMOE API listening on port ${PORT}`);
-  console.log(`Smartsheet token: ${process.env.SMARTSHEET_TOKEN ? 'SET ✓' : 'NOT SET ✗'}`);
+  console.log(`Smartsheet token:  ${process.env.SMARTSHEET_TOKEN  ? 'SET ✓' : 'NOT SET ✗'}`);
+  console.log(`Anthropic API key: ${process.env.ANTHROPIC_API_KEY ? 'SET ✓' : 'NOT SET ✗'}`);
 });
