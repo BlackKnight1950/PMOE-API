@@ -125,6 +125,7 @@ app.get('/api/data', async (req, res) => {
     const delivVid    = cols.find(c => c.title === 'Deliverable')?.virtualId;
     const statusVid   = cols.find(c => c.title === 'Status')?.virtualId;
     const assignedVid = cols.find(c => c.title === 'Assigned To')?.virtualId;
+    const sponsorVid   = cols.find(c => c.title === 'Sponsor')?.virtualId;
     const riskVid     = cols.find(c => c.title === 'Risk or Issue')?.virtualId;
     const impactVid   = cols.find(c => c.title === 'Impact/Notes')?.virtualId;
 
@@ -141,15 +142,18 @@ app.get('/api/data', async (req, res) => {
 
       if (!project) return;
 
+      const sponsor = cell(sponsorVid)?.displayValue || '';
+
       if (!projectMap[project]) {
-        projectMap[project] = { project, pm, lastUpdated: date, deliverables: [] };
+        projectMap[project] = { project, pm, sponsor, lastUpdated: date, deliverables: [] };
       }
       if (deliv || status) {
         projectMap[project].deliverables.push({
           name: deliv, status, risk: risk || '', impact: impact || ''
         });
       }
-      if (pm && !projectMap[project].pm)              projectMap[project].pm = pm;
+      if (pm      && !projectMap[project].pm)      projectMap[project].pm      = pm;
+      if (sponsor && !projectMap[project].sponsor) projectMap[project].sponsor  = sponsor;
       if (date > (projectMap[project].lastUpdated || '')) projectMap[project].lastUpdated = date;
     });
 
