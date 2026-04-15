@@ -242,6 +242,53 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
+// ── Master File endpoint — phases, sponsors, PM from PMOE Load (Master File) ──
+// Sheet ID: 6897799930374020
+const MASTER_SHEET = '6897799930374020';
+
+app.get('/api/master', async (req, res) => {
+  if (!process.env.SMARTSHEET_TOKEN) {
+    return res.status(500).json({ error: 'SMARTSHEET_TOKEN not configured.' });
+  }
+  try {
+    const r = await fetch(
+      `${SS_BASE}/sheets/${MASTER_SHEET}?pageSize=500&columnIds=3210811938236292,7714411565606788,2084912031393668,6588511658764164,3647515622958980`,
+      { headers: ssHeaders() }
+    );
+    if (!r.ok) return res.status(502).json({ error: `Smartsheet ${r.status}` });
+    const data = await r.json();
+
+    const cols       = data.columns || [];
+    const initId     = cols.find(c => c.title === 'Initiative')?.id;
+    const statusId   = cols.find(c => c.title === 'Status')?.id;
+    const phaseId    = cols.find(c => c.title === 'Phase')?.id;
+    const sponsorId  = cols.find(c => c.title === 'Sponsors')?.id;
+    const pmId       = cols.find(c => c.title === 'Project Manager')?.id;
+
+    const projects = (data.rows || []).map(row => {
+      const cell = id => (row.cells || []).find(c => c.columnId == id);
+      const name = cell(initId)?.displayValue;
+      if (!name) return null;
+      const status = cell(statusId)?.displayValue || '';
+      // Only return active/in-progress rows
+      if (!['In Progress','On Hold'].includes(status)) return null;
+      return {
+        name,
+        status,
+        phase:   cell(phaseId)?.displayValue  || '',
+        sponsor: cell(sponsorId)?.displayValue || '',
+        pm:      cell(pmId)?.displayValue      || '',
+      };
+    }).filter(Boolean);
+
+    res.json({ fetchedAt: new Date().toISOString(), projects });
+  } catch (err) {
+    console.error('Master error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`PMOE API listening on port ${PORT}`);
   console.log(`Smartsheet token:  ${process.env.SMARTSHEET_TOKEN  ? 'SET ✓' : 'NOT SET ✗'}`);
