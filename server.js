@@ -251,33 +251,45 @@ app.get('/api/master', async (req, res) => {
     return res.status(500).json({ error: 'SMARTSHEET_TOKEN not configured.' });
   }
   try {
+    // Fetch ALL columns — no columnIds filter so we get everything including Start/End
     const r = await fetch(
-      `${SS_BASE}/sheets/${MASTER_SHEET}?pageSize=500&columnIds=3210811938236292,7714411565606788,2084912031393668,6588511658764164,3647515622958980`,
+      `${SS_BASE}/sheets/${MASTER_SHEET}?pageSize=500`,
       { headers: ssHeaders() }
     );
     if (!r.ok) return res.status(502).json({ error: `Smartsheet ${r.status}` });
     const data = await r.json();
 
-    const cols       = data.columns || [];
-    const initId     = cols.find(c => c.title === 'Initiative')?.id;
-    const statusId   = cols.find(c => c.title === 'Status')?.id;
-    const phaseId    = cols.find(c => c.title === 'Phase')?.id;
-    const sponsorId  = cols.find(c => c.title === 'Sponsors')?.id;
-    const pmId       = cols.find(c => c.title === 'Project Manager')?.id;
+    const cols     = data.columns || [];
+    const initId   = cols.find(c => c.title === 'Initiative')?.id;
+    const statusId = cols.find(c => c.title === 'Status')?.id;
+    const phaseId  = cols.find(c => c.title === 'Phase')?.id;
+    const sponsorId= cols.find(c => c.title === 'Sponsors')?.id;
+    const pmId     = cols.find(c => c.title === 'Project Manager')?.id;
+    const startId  = cols.find(c => c.title === 'Start')?.id;
+    const endId    = cols.find(c => c.title === 'End')?.id;
+    const domainId = cols.find(c => c.title === 'Strategic Domain')?.id;
+    const healthId = cols.find(c => c.title === 'Health Status')?.id;
 
     const projects = (data.rows || []).map(row => {
       const cell = id => (row.cells || []).find(c => c.columnId == id);
       const name = cell(initId)?.displayValue;
       if (!name) return null;
       const status = cell(statusId)?.displayValue || '';
-      // Only return active/in-progress rows
+      // Only active projects (In Progress or On Hold)
       if (!['In Progress','On Hold'].includes(status)) return null;
+      // Skip sub-deliverable rows (no sponsor/phase = child row)
+      const phase = cell(phaseId)?.displayValue || '';
+      if (!phase) return null;
       return {
         name,
         status,
-        phase:   cell(phaseId)?.displayValue  || '',
+        phase,
         sponsor: cell(sponsorId)?.displayValue || '',
         pm:      cell(pmId)?.displayValue      || '',
+        start:   cell(startId)?.value          || '',
+        end:     cell(endId)?.value            || '',
+        domain:  cell(domainId)?.displayValue  || '',
+        health:  cell(healthId)?.displayValue  || 'Green',
       };
     }).filter(Boolean);
 
