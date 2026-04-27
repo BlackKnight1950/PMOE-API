@@ -301,6 +301,53 @@ app.get('/api/master', async (req, res) => {
 });
 
 
+// ── EARN / Domestic Spend data endpoint ──────────────────────────────────────
+// Searches for the domestic spend and pharmacy tracking sheets, parses their
+// summary metrics, and returns structured data for the dashboard charts.
+// Falls back gracefully if sheets are not accessible with this token.
+app.get('/api/earn', async (req, res) => {
+  if (!process.env.SMARTSHEET-TOKEN) {
+    return res.status(500).json({ error: 'SMARTSHEET-TOKEN not configured.' });
+  }
+  try {
+    // Search for sheets that feed the EARN dashboard
+    const [dsSearch, pharmSearch] = await Promise.all([
+      fetch(`${SS_BASE}/search?query=Domestic+Spend+Tracking&scopes=sheetNames`, { headers: ssHeaders() }),
+      fetch(`${SS_BASE}/search?query=Pharmacy+Domestic+Spend+Budget&scopes=sheetNames`, { headers: ssHeaders() })
+    ]);
+
+    const [dsData, pharmData] = await Promise.all([
+      dsSearch.ok ? dsSearch.json() : { results: [] },
+      pharmSearch.ok ? pharmSearch.json() : { results: [] }
+    ]);
+
+    // Find sheet IDs
+    const dsSheet    = (dsData.results   || []).find(r => r.objectType === 'sheet');
+    const pharmSheet = (pharmData.results || []).find(r => r.objectType === 'sheet');
+
+    let earnResponse = { fetchedAt: new Date().toISOString(), accessible: false };
+
+    if (dsSheet) {
+      const sheetRes = await fetch(`${SS_BASE}/sheets/${dsSheet.objectId}?pageSize=100`, { headers: ssHeaders() });
+      if (sheetRes.ok) {
+        const sheetData = await sheetRes.json();
+        earnResponse.accessible = true;
+        earnResponse.sheetName  = dsSheet.text;
+        earnResponse.rows       = (sheetData.rows || []).length;
+        // Parse columns dynamically — field names vary
+        const cols = sheetData.columns || [];
+        earnResponse.columns = cols.map(c => ({ id: c.id, title: c.title }));
+      }
+    }
+
+    res.json(earnResponse);
+  } catch (err) {
+    console.error('EARN error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`PMOE API listening on port ${PORT}`);
   console.log(`Smartsheet token:  ${process.env.SMARTSHEET_TOKEN  ? 'SET ✓' : 'NOT SET ✗'}`);
