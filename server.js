@@ -306,8 +306,8 @@ app.get('/api/master', async (req, res) => {
 // summary metrics, and returns structured data for the dashboard charts.
 // Falls back gracefully if sheets are not accessible with this token.
 app.get('/api/earn', async (req, res) => {
-  if (!process.env.SMARTSHEET-TOKEN) {
-    return res.status(500).json({ error: 'SMARTSHEET-TOKEN not configured.' });
+  if (!process.env.SMARTSHEET_TOKEN) {
+    return res.status(500).json({ error: 'SMARTSHEET_TOKEN not configured.' });
   }
   try {
     // Search for sheets that feed the EARN dashboard
