@@ -110,14 +110,6 @@ app.post('/api/ai', async (req, res) => {
 });
 
 // ── Cody chatbot proxy ────────────────────────────────────────────────────────
-// Cody (getcody.ai) API blocks direct browser calls — proxied here server-side.
-// The API key and bot ID stay secure in Render environment variables.
-//
-// Flow:
-//   1. Dashboard calls POST /api/cody/conversation to start a session → gets conversation_id
-//   2. Dashboard calls POST /api/cody/message with { content, conversation_id } per message
-//   Cody manages conversation history automatically via conversation_id.
-
 const CODY_BASE = 'https://getcody.ai/api/v1';
 
 function codyHeaders() {
@@ -127,7 +119,7 @@ function codyHeaders() {
   };
 }
 
-// Create a new conversation session
+// Create a new Cody conversation session
 app.post('/api/cody/conversation', async (req, res) => {
   if (!process.env.CODY_API_KEY || !process.env.CODY_BOT_ID) {
     return res.status(500).json({ error: 'CODY_API_KEY or CODY_BOT_ID not configured in Render.' });
@@ -153,34 +145,143 @@ app.post('/api/cody/conversation', async (req, res) => {
   }
 });
 
-// Send a message and get Cody's response
-app.post('/api/cody/message', async (req, res) => {
-  if (!process.env.CODY_API_KEY) {
-    return res.status(500).json({ error: 'CODY_API_KEY not configured in Render.' });
-  }
-  const { content, conversation_id } = req.body || {};
-  if (!content)         return res.status(400).json({ error: 'content is required' });
-  if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+// ── Hybrid chat endpoint — Cody knowledge base + Claude dashboard intelligence ──
+// Strategy:
+//   1. Ask Cody first — it has access to your uploaded PMOE knowledge base documents.
+//   2. Detect if Cody's answer is a "don't know" response (no info in knowledge base).
+//   3. If Cody answered well → return it directly (source: 'cody').
+//   4. If Cody didn't know → ask Claude with full dashboard context (source: 'claude').
+//   5. If Cody partially answered → Claude enriches it with live dashboard data (source: 'hybrid').
+//
+// Body: { content, conversation_id, dashboard_context }
+//   content           — the user's message
+//   conversation_id   — Cody conversation session ID
+//   dashboard_context — JSON string of current portfolio state for Claude's context
+
+const CODY_FALLBACK_PHRASES = [
+  "i'm unable to provide",
+  "i cannot provide",
+  "no information",
+  "not in my knowledge base",
+  "i don't have",
+  "i do not have",
+  "knowledge base does not",
+  "isn't in my knowledge",
+  "not available in",
+  "unable to find",
+  "i lack the",
+  "outside my knowledge",
+  "i have no information",
+  "there is no information",
+  "there is no data",
+  "i am unable to",
+  "my knowledge base",
+  "not included in",
+  "cannot find any",
+  "no details about"
+];
+
+function isCodyFallback(text) {
+  const lower = (text || '').toLowerCase();
+  return CODY_FALLBACK_PHRASES.some(phrase => lower.includes(phrase));
+}
+
+async function askClaude(userMessage, dashboardContext, conversationHistory) {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+
+  const systemPrompt = `You are Ask Cody, the PMOE Virtual Assistant for Cook County Health's Project Management & Operational Excellence (PMOE) department. You help users understand and navigate the PMOE Command Center dashboard.
+
+You have access to the following live dashboard data:
+${dashboardContext}
+
+Guidelines:
+- Be concise, warm, and professional.
+- When answering about projects, reference specific details from the dashboard data above.
+- For navigation questions, guide users to the relevant dashboard tab.
+- If asked about a specific project, pull its PM, status, and latest update from the data.
+- Never mention "Claude", "Anthropic", or that you are an AI language model. You are Cody, PMOE's assistant.
+- If truly unable to answer, suggest the user contact the relevant PM directly or press Refresh for the latest live data.`;
+
+  const messages = [
+    ...(Array.isArray(conversationHistory) ? conversationHistory : []),
+    { role: 'user', content: userMessage }
+  ];
 
   try {
-    const r = await fetch(`${CODY_BASE}/messages`, {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: codyHeaders(),
-      body: JSON.stringify({ content, conversation_id })
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
+        system: systemPrompt,
+        messages
+      })
     });
-    if (!r.ok) {
-      const err = await r.text();
-      return res.status(502).json({ error: `Cody error ${r.status}: ${err}` });
-    }
-    const data = await r.json();
-    const reply = data.data?.content || '';
-    const failed = data.data?.failed_responding || false;
-    if (failed) return res.status(500).json({ error: 'Cody failed to generate a response.' });
-    res.json({ text: reply, message_id: data.data?.id });
-  } catch (err) {
-    console.error('Cody message error:', err.message);
-    res.status(500).json({ error: err.message });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data.content || []).map(b => b.text || '').join('').trim();
+  } catch (e) {
+    console.error('Claude fallback error:', e.message);
+    return null;
   }
+}
+
+app.post('/api/chat', async (req, res) => {
+  const { content, conversation_id, dashboard_context, history } = req.body || {};
+  if (!content) return res.status(400).json({ error: 'content is required' });
+
+  const hasCody   = !!(process.env.CODY_API_KEY && conversation_id);
+  const hasClaude = !!process.env.ANTHROPIC_API_KEY;
+
+  let codyText  = null;
+  let codyFailed = false;
+
+  // ── Step 1: Try Cody first ───────────────────────────────────────────────
+  if (hasCody) {
+    try {
+      const r = await fetch(`${CODY_BASE}/messages`, {
+        method: 'POST',
+        headers: codyHeaders(),
+        body: JSON.stringify({ content, conversation_id })
+      });
+      if (r.ok) {
+        const data = await r.json();
+        codyText   = data.data?.content || '';
+        codyFailed = data.data?.failed_responding || false;
+        if (codyFailed) codyText = null;
+      }
+    } catch (e) {
+      console.warn('Cody step failed:', e.message);
+      codyFailed = true;
+    }
+  }
+
+  // ── Step 2: Decide routing ───────────────────────────────────────────────
+  const codyDidntKnow = !codyText || isCodyFallback(codyText);
+
+  if (!codyDidntKnow) {
+    // Cody answered from its knowledge base — return directly
+    return res.json({ text: codyText, source: 'cody' });
+  }
+
+  // ── Step 3: Claude fallback / enrichment ────────────────────────────────
+  if (hasClaude) {
+    const claudeText = await askClaude(content, dashboard_context || '(no dashboard data provided)', history);
+    if (claudeText) {
+      return res.json({ text: claudeText, source: codyText ? 'hybrid' : 'claude' });
+    }
+  }
+
+  // ── Step 4: Last resort — surface whatever Cody said or generic message ──
+  return res.json({
+    text: codyText || "I'm sorry, I don't have enough information to answer that right now. Please try pressing Refresh to load the latest dashboard data, or reach out to the relevant project manager directly.",
+    source: 'fallback'
+  });
 });
 
 // ── Main data endpoint ────────────────────────────────────────────────────────
