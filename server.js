@@ -5,11 +5,15 @@
  * Set environment variables in Render dashboard:
  *   SMARTSHEET_TOKEN  = your Smartsheet API token
  *   ANTHROPIC_API_KEY = your Anthropic API key  (for Key Insights)
+ *   CODY_API_KEY      = your Cody AI API key    (for Ask Cody chatbot)
+ *   CODY_BOT_ID       = your Cody bot ID        (from GET /api/v1/bots)
  *
  * Endpoints:
- *   GET  /api/health  — health check (no auth needed)
- *   GET  /api/data    — returns live project + risk + compliance data
- *   POST /api/ai      — proxy for Claude Key Insights (body: { prompt })
+ *   GET  /api/health        — health check (no auth needed)
+ *   GET  /api/data          — returns live project + risk + compliance data
+ *   POST /api/ai            — proxy for Claude Key Insights (body: { prompt })
+ *   POST /api/cody/message  — proxy for Cody chatbot (body: { content, conversation_id? })
+ *   POST /api/cody/conversation — create a new Cody conversation (body: { name })
  */
 
 const express = require('express');
@@ -42,7 +46,8 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     smartsheet_configured: !!process.env.SMARTSHEET_TOKEN,
-    anthropic_configured:  !!process.env.ANTHROPIC_API_KEY
+    anthropic_configured:  !!process.env.ANTHROPIC_API_KEY,
+    cody_configured:       !!(process.env.CODY_API_KEY && process.env.CODY_BOT_ID)
   });
 });
 
@@ -100,6 +105,80 @@ app.post('/api/ai', async (req, res) => {
 
   } catch (err) {
     console.error('AI proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Cody chatbot proxy ────────────────────────────────────────────────────────
+// Cody (getcody.ai) API blocks direct browser calls — proxied here server-side.
+// The API key and bot ID stay secure in Render environment variables.
+//
+// Flow:
+//   1. Dashboard calls POST /api/cody/conversation to start a session → gets conversation_id
+//   2. Dashboard calls POST /api/cody/message with { content, conversation_id } per message
+//   Cody manages conversation history automatically via conversation_id.
+
+const CODY_BASE = 'https://getcody.ai/api/v1';
+
+function codyHeaders() {
+  return {
+    'Authorization': `Bearer ${process.env.CODY_API_KEY}`,
+    'Content-Type': 'application/json'
+  };
+}
+
+// Create a new conversation session
+app.post('/api/cody/conversation', async (req, res) => {
+  if (!process.env.CODY_API_KEY || !process.env.CODY_BOT_ID) {
+    return res.status(500).json({ error: 'CODY_API_KEY or CODY_BOT_ID not configured in Render.' });
+  }
+  try {
+    const r = await fetch(`${CODY_BASE}/conversations`, {
+      method: 'POST',
+      headers: codyHeaders(),
+      body: JSON.stringify({
+        name: `PMOE Dashboard Session ${Date.now()}`,
+        bot_id: process.env.CODY_BOT_ID
+      })
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      return res.status(502).json({ error: `Cody error ${r.status}: ${err}` });
+    }
+    const data = await r.json();
+    res.json({ conversation_id: data.data?.id });
+  } catch (err) {
+    console.error('Cody conversation error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a message and get Cody's response
+app.post('/api/cody/message', async (req, res) => {
+  if (!process.env.CODY_API_KEY) {
+    return res.status(500).json({ error: 'CODY_API_KEY not configured in Render.' });
+  }
+  const { content, conversation_id } = req.body || {};
+  if (!content)         return res.status(400).json({ error: 'content is required' });
+  if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+
+  try {
+    const r = await fetch(`${CODY_BASE}/messages`, {
+      method: 'POST',
+      headers: codyHeaders(),
+      body: JSON.stringify({ content, conversation_id })
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      return res.status(502).json({ error: `Cody error ${r.status}: ${err}` });
+    }
+    const data = await r.json();
+    const reply = data.data?.content || '';
+    const failed = data.data?.failed_responding || false;
+    if (failed) return res.status(500).json({ error: 'Cody failed to generate a response.' });
+    res.json({ text: reply, message_id: data.data?.id });
+  } catch (err) {
+    console.error('Cody message error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -321,4 +400,6 @@ app.listen(PORT, () => {
   console.log(`PMOE API listening on port ${PORT}`);
   console.log(`Smartsheet token:  ${process.env.SMARTSHEET_TOKEN  ? 'SET ✓' : 'NOT SET ✗'}`);
   console.log(`Anthropic API key: ${process.env.ANTHROPIC_API_KEY ? 'SET ✓' : 'NOT SET ✗'}`);
+  console.log(`Cody API key:      ${process.env.CODY_API_KEY      ? 'SET ✓' : 'NOT SET ✗'}`);
+  console.log(`Cody Bot ID:       ${process.env.CODY_BOT_ID       ? 'SET ✓' : 'NOT SET ✗'}`);
 });
