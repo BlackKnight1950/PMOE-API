@@ -46,10 +46,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ── AI proxy — routes Key Insights calls through server so the API key ────────
-// stays server-side and CORS is never an issue.
+// ── AI proxy — routes Key Insights + Cody chatbot calls through server ───────
+// API key stays server-side; CORS is never an issue.
+// Body params:
+//   prompt  (string, required) — the current user message
+//   system  (string, optional) — system prompt (used by Cody for context)
+//   history (array,  optional) — prior conversation turns [{role,content},…]
 app.post('/api/ai', async (req, res) => {
-  const { prompt } = req.body || {};
+  const { prompt, system, history } = req.body || {};
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -58,7 +62,23 @@ app.post('/api/ai', async (req, res) => {
     });
   }
 
+  // Build messages array: prior history + current user message
+  const messages = [
+    ...(Array.isArray(history) ? history : []),
+    { role: 'user', content: prompt }
+  ];
+
   try {
+    const payload = {
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 1000,
+      messages
+    };
+    // Only include system prompt if provided (Key Insights callers don't send one)
+    if (system && typeof system === 'string' && system.trim()) {
+      payload.system = system;
+    }
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -66,11 +86,7 @@ app.post('/api/ai', async (req, res) => {
         'x-api-key':            process.env.ANTHROPIC_API_KEY,
         'anthropic-version':    '2023-06-01'
       },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages:   [{ role: 'user', content: prompt }]
-      })
+      body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
@@ -296,53 +312,6 @@ app.get('/api/master', async (req, res) => {
     res.json({ fetchedAt: new Date().toISOString(), projects });
   } catch (err) {
     console.error('Master error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// ── EARN / Domestic Spend data endpoint ──────────────────────────────────────
-// Searches for the domestic spend and pharmacy tracking sheets, parses their
-// summary metrics, and returns structured data for the dashboard charts.
-// Falls back gracefully if sheets are not accessible with this token.
-app.get('/api/earn', async (req, res) => {
-  if (!process.env.SMARTSHEET_TOKEN) {
-    return res.status(500).json({ error: 'SMARTSHEET_TOKEN not configured.' });
-  }
-  try {
-    // Search for sheets that feed the EARN dashboard
-    const [dsSearch, pharmSearch] = await Promise.all([
-      fetch(`${SS_BASE}/search?query=Domestic+Spend+Tracking&scopes=sheetNames`, { headers: ssHeaders() }),
-      fetch(`${SS_BASE}/search?query=Pharmacy+Domestic+Spend+Budget&scopes=sheetNames`, { headers: ssHeaders() })
-    ]);
-
-    const [dsData, pharmData] = await Promise.all([
-      dsSearch.ok ? dsSearch.json() : { results: [] },
-      pharmSearch.ok ? pharmSearch.json() : { results: [] }
-    ]);
-
-    // Find sheet IDs
-    const dsSheet    = (dsData.results   || []).find(r => r.objectType === 'sheet');
-    const pharmSheet = (pharmData.results || []).find(r => r.objectType === 'sheet');
-
-    let earnResponse = { fetchedAt: new Date().toISOString(), accessible: false };
-
-    if (dsSheet) {
-      const sheetRes = await fetch(`${SS_BASE}/sheets/${dsSheet.objectId}?pageSize=100`, { headers: ssHeaders() });
-      if (sheetRes.ok) {
-        const sheetData = await sheetRes.json();
-        earnResponse.accessible = true;
-        earnResponse.sheetName  = dsSheet.text;
-        earnResponse.rows       = (sheetData.rows || []).length;
-        // Parse columns dynamically — field names vary
-        const cols = sheetData.columns || [];
-        earnResponse.columns = cols.map(c => ({ id: c.id, title: c.title }));
-      }
-    }
-
-    res.json(earnResponse);
-  } catch (err) {
-    console.error('EARN error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
